@@ -155,10 +155,11 @@ jobs:
       - name: Linux libraries GPUI links to and Cross-compiler
         if: runner.os == 'Linux'
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64 libxkbcommon-dev:arm64
           fi
       - name: Metal shaders compiled now, or at run time without the Metal toolchain
         # GPUI compiles its Metal shaders when it builds; the Mac mini has Xcode without the Metal toolchain
