@@ -146,7 +146,7 @@ jobs:
           clean: true
       - uses: dtolnay/rust-toolchain@stable
         with:
-       targets: ${{ matrix.target || '' }}
+          targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
         with:
@@ -271,7 +271,7 @@ jobs:
             fi
           fi
           ls -l out
-sign:
+  sign:
     needs: [decide, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -309,7 +309,6 @@ sign:
           name: ephemeral.pub
           path: dist/ephemeral.pub
           retention-days: 3
-
   release:
     needs: [decide, build, sign]
     runs-on: ubuntu-latest
