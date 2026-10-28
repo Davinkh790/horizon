@@ -101,6 +101,11 @@ jobs:
             os: ubuntu-22.04
             asset: horizon-launcher-linux-x86_64.tar.gz
             binary: horizon-launcher
+          - name: linux-aarch64
+            os: ubuntu-22.04
+            asset: horizon-launcher-linux-aarch64.tar.gz
+            binary: horizon-launcher
+            target: aarch64-unknown-linux-gnu
           - name: macos
             mac: true
             asset: horizon-launcher-macos-arm64.zip
@@ -140,16 +145,21 @@ jobs:
           # parity jobs, and nothing they leave may end up in a launcher release (target/ is rebuilt from scratch).
           clean: true
       - uses: dtolnay/rust-toolchain@stable
+        with:
+       targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
         with:
           workspaces: launcher
           shared-key: launcher-${{ matrix.name }}
-      - name: Linux libraries GPUI links to
+      - name: Linux libraries GPUI links to and Cross-compiler
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
       - name: Metal shaders compiled now, or at run time without the Metal toolchain
         # GPUI compiles its Metal shaders when it builds; the Mac mini has Xcode without the Metal toolchain
         # (xcodebuild -downloadComponent MetalToolchain), so there they are compiled when the launcher starts.
@@ -160,17 +170,34 @@ jobs:
             echo "LAUNCHER_FEATURES=gpui/runtime_shaders" >> "$GITHUB_ENV"
           fi
       # Every test target (the library, the binary, tests/), on each system the launcher ships for.
-      - run: cargo test --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
-      - run: cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Run tests (Native x86_64 only)
+        if: matrix.target == ''
+        run: cargo test --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Build Launcher
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          target_arg=""
+          if [[ -n "${{ matrix.target }}" ]]; then
+            target_arg="--target ${{ matrix.target }}"
+          fi
+          cargo build --release --locked $target_arg ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - name: The version is the release's
         run: |
-          out=$(target/release/${{ matrix.binary }} --version)
+          bin_path="target/release/${{ matrix.binary }}"
+          if [[ -n "${{ matrix.target }}" ]]; then
+           bin_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          fi
+          out=$("$bin_path" --version)
           echo "$out"
           expected="${HORIZON_LAUNCHER_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
           [[ "$out" == "horizon-launcher $expected" ]] || { echo "::error::expected horizon-launcher $expected"; exit 1; }
       - name: Only system libraries
         run: |
-          file=target/release/${{ matrix.binary }}
+          file="target/release/${{ matrix.binary }}"
+          if [[ -n "${{ matrix.target }}" ]]; then
+           file="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          fi
           case "$RUNNER_OS" in
             Windows) python ../tools/check_imports.py "$file" ;;
             macOS) others=$(otool -L "$file" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/Library/)' || true)
@@ -185,7 +212,11 @@ jobs:
           export HORIZON_LAUNCHER_HOME="${RUNNER_TEMP//\\//}/horizon-launcher-smoke"
           export HORIZON_HOME="$HORIZON_LAUNCHER_HOME/game"
           rm -rf "$HORIZON_LAUNCHER_HOME"
-          launcher="$PWD/target/release/${{ matrix.binary }}"
+          bin_dir="target/release"
+          if [[ -n "${{ matrix.target }}" ]]; then
+           bin_dir="target/${{ matrix.target }}/release"
+          fi
+          launcher="$PWD/$bin_dir/${{ matrix.binary }}"
           # GitHub's API rate-limits shared runner addresses now and then: try a few times.
           retry() { for i in 1 2 3 4; do "$@" && return 0; sleep $((i * 15)); done; return 1; }
           retry "$launcher" versions
@@ -218,15 +249,21 @@ jobs:
         run: |
           rm -rf dist out && mkdir -p out
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            # Horizon.app, zipped (self-update) and in a .dmg (installer), signed (and notarized with
-            # Developer ID): packaging/macos.
             python3 -m venv "$RUNNER_TEMP/dmg" && "$RUNNER_TEMP/dmg/bin/pip" install --quiet dmgbuild==1.6.5
             version=${HORIZON_LAUNCHER_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}
-            DMGBUILD="$RUNNER_TEMP/dmg/bin/dmgbuild" ../packaging/macos/package.sh target/release/${{ matrix.binary }} "$version" out
+            bin_path="target/release/${{ matrix.binary }}"
+            if [[ -n "${{ matrix.target }}" ]]; then
+              bin_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+            fi
+            DMGBUILD="$RUNNER_TEMP/dmg/bin/dmgbuild" ../packaging/macos/package.sh "$bin_path" "$version" out
             rm -rf out/Horizon.app
           else
             mkdir -p dist
-            cp target/release/${{ matrix.binary }} dist/
+            bin_path="target/release/${{ matrix.binary }}"
+            if [[ -n "${{ matrix.target }}" ]]; then
+              bin_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+            fi
+            cp "$bin_path" dist/
             if [[ "${{ matrix.asset }}" == *.tar.gz ]]; then
               (cd dist && tar czf ../out/${{ matrix.asset }} ${{ matrix.binary }})
             else
@@ -234,16 +271,7 @@ jobs:
             fi
           fi
           ls -l out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: launcher/out/*
-          retention-days: 3
-      - name: The signing keychain, locked again
-        if: always() && runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != ''
-        run: ../packaging/macos/keychain.sh lock
-
-  sign:
+sign:
     needs: [decide, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
